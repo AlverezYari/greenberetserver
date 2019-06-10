@@ -5,6 +5,7 @@ from json import JSONEncoder
 import os, uuid, base64, json, sys, argparse
 from git.repo.base import Repo
 from pathlib import Path
+import yaml
 
 
 application = Flask(__name__)
@@ -12,7 +13,6 @@ application = Flask(__name__)
 
 projectList = []
 connectionsList = []
-
 
 ###Define some functions
 ##
@@ -24,6 +24,35 @@ def pullTargetRepo(repoTarget):
 
     return cloned_repo
 
+
+# Checks the purposed Name for the project to make sure it's not already created
+def checkProjectNameSecret( purposedName , projectFullName ):
+
+     client.configuration.assert_hostname = False
+
+     api_instance = client.CoreV1Api()
+
+     clusterProjectList = api_instance.list_namespaced_secret(
+          namespace="default", pretty=True
+     )
+
+     for item in clusterProjectList.items:
+
+          tempDetails = yaml.load(str(item))
+
+          if type(tempDetails["metadata"]['annotations']) == dict and 'projectName' in tempDetails["metadata"]['annotations'].keys() and tempDetails["metadata"]['annotations']['projectName'] == projectFullName:
+               
+               print('Failed: Project Full Name already deployed in target cluster')
+               
+               return False
+          
+          elif tempDetails["metadata"]['name'] == purposedName:
+
+               print ( 'Failed: Project Purposed Secret already deployed in target cluster' )
+
+               return False
+
+     return True
 
 # Gets a List of project/jobnames from the repo
 def getJobs():
@@ -48,7 +77,7 @@ def getJobs():
             "./src/_brigade/" + projectName + "/" + job + "/gb.json"
         ) as json_file:
 
-            jobAdd = json.load(json_file)
+            jobDetails = json.load(json_file)
 
         with open(
             "./src/_brigade/" + projectName + "/" + job + "/brigade.js"
@@ -56,7 +85,7 @@ def getJobs():
 
             brigadeScript = brigadeStore.read()
 
-        jobs[job] = jobAdd
+        jobs[job] = jobDetails
 
         jobs[job]["brigade-script"] = brigadeScript
 
@@ -66,47 +95,55 @@ def getJobs():
 # Reads config file from Repo, uses the job names from getJobs() and creates Brigade project/jobs in the cluster
 def createProjects(jobs):
 
-    for k, v in jobs.items():
+     for k, v in jobs.items():
 
-        connectionHold = {}
+          prodID = str(uuid.uuid4())
 
-        client.configuration.assert_hostname = False
+          projectFullName = str(v["projectName"])+ "/" + str(v["jobName"])
 
-        api_instance = client.CoreV1Api()
+          purposedName = "greenberet-" + str(prodID)
 
-        sec = client.V1Secret()
+          connectionHold = {}
 
-        prodID = str(uuid.uuid4())
+          client.configuration.assert_hostname = False
 
-        v["Project-Name"] = "greenberet-" + str(prodID)
+          api_instance = client.CoreV1Api()
 
-        sec.metadata = client.V1ObjectMeta(
-            name=v["Project-Name"],
-            namespace="default",
-            labels={"app": "brigade", "component": "project", "heritage": "brigade"},
-        )
+          sec = client.V1Secret()
 
-        sec.type = "brigade.sh/project"
+          if checkProjectNameSecret(purposedName, projectFullName) == False:
 
-        sec.string_data = {
-            "defaultScript": v["brigade-script"],
-            "genericGatewaySecret": v["gatewaySecret"],
-        }
+               print("Bad Project Secret or Project Full Name - Already exist")
 
-        api_instance.create_namespaced_secret(namespace="default", body=sec)
+               break
+               
+          v["Project-Secret-Name"] = purposedName
 
-        connectionHold["Project Name"] = v["Project-Name"]
+          sec.metadata = client.V1ObjectMeta(
+               name=v["Project-Secret-Name"],
+               namespace="default",
+               labels={"app": "brigade", "component": "project", "heritage": "brigade"},
+               annotations={"projectName": str(projectFullName)},
+          )
 
-        connectionHold["Job Name"] = str(k)
+          sec.type = "brigade.sh/project"
 
-        connectionHold["Job Secret"] = v["gatewaySecret"]
+          sec.string_data = {
+               "defaultScript": v["brigade-script"],
+               "genericGatewaySecret": v["gatewaySecret"],
+          }
 
-        connectionsList.append(connectionHold)
+          api_instance.create_namespaced_secret(namespace="default", body=sec)
 
-    return connectionsList
+          connectionHold["Project Name"] = v["Project-Secret-Name"]
 
+          connectionHold["Job Name"] = str(k)
 
-## !!! def checkProjectName ():
+          connectionHold["Job Secret"] = v["gatewaySecret"]
+
+          connectionsList.append(connectionHold)
+
+     return connectionsList
 
 
 # routing clean up from incoming web request
@@ -115,9 +152,11 @@ application.url_map.strict_slashes = False
 
 # catches any routing artifacts and forces the request to the correct location and the correct method
 
+
 @application.route("/<path:dummy>", methods=["POST"])
 
 # Main Flask Command function - trigger on successful call into Flask via Gunicorn
+
 
 def fallback(dummy):
 
@@ -125,27 +164,27 @@ def fallback(dummy):
 
     # demo request stored locally for testing comment out to remove
     with open("demo_request.json") as json_file:
-        
+
         incomingRequest = json.load(json_file)
-    
+
     # Create dictonary to hold our answer
-    
+
     response = {}
-    
+
     ## ** Dev - Testing: Set our Repo to Clone
     ## ** Dev - Testing:    repoTarget = response['Response Message']['resource']['repository']['remoteUrl']
     ## ** Dev - Testing: Pull our target repo
     ## ** Dev - Testing:   pullTargetRepo(repoTarget)
-    
+
     #  Get the Job Info
     getJobs()
-    
+
     # Set the jobs into brigade and return the gateway info for each.
     createProjects(jobs)
-    
+
     # Set our predict var
     response["Response Message"] = connectionsList
-    
+
     # Return our response in json format
     return jsonify(response.get("Response Message"))
 
@@ -153,13 +192,13 @@ def fallback(dummy):
 # Starts the flask app
 
 if __name__ == "__main__":
-    
+
     try:
-        
+
         config.load_incluster_config()
-    
+
     except:
-        
+
         config.load_kube_config()
 
     application.run(host="0.0.0.0")
