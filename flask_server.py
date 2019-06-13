@@ -9,13 +9,13 @@ import yaml
 
 
 application = Flask(__name__)
-# Define some vars
+
+### Define vars
 
 projectList = []
 connectionsList = []
 
-###Define some functions
-##
+### Define functions
 
 # Pulls the triggering webhooks AzureDev's repo address and clones it to the local docker container
 def pullTargetRepo(repoTarget):
@@ -28,31 +28,31 @@ def pullTargetRepo(repoTarget):
 # Checks the purposed Name for the project to make sure it's not already created
 def checkProjectNameSecret( purposedName , projectFullName ):
 
-     client.configuration.assert_hostname = False
+    client.configuration.assert_hostname = False
 
-     api_instance = client.CoreV1Api()
+    api_instance = client.CoreV1Api()
 
-     clusterProjectList = api_instance.list_namespaced_secret(
-          namespace="default", pretty=True
-     )
+    clusterProjectList = api_instance.list_namespaced_secret(
+        namespace="default", pretty=True
+    )
 
-     for item in clusterProjectList.items:
+    for item in clusterProjectList.items:
 
-          tempDetails = yaml.load(str(item))
+        tempDetails = yaml.load(str(item))
 
-          if type(tempDetails["metadata"]['annotations']) == dict and 'projectName' in tempDetails["metadata"]['annotations'].keys() and tempDetails["metadata"]['annotations']['projectName'] == projectFullName:
-               
-               print('Failed: Project Full Name already deployed in target cluster')
-               
-               return False
-          
-          elif tempDetails["metadata"]['name'] == purposedName:
+        if type(tempDetails["metadata"]['annotations']) == dict and 'projectName' in tempDetails["metadata"]['annotations'].keys() and tempDetails["metadata"]['annotations']['projectName'] == projectFullName:
+            
+            print('Failed: Project Full Name already deployed in target cluster')
+            
+            return False
+    
+        elif tempDetails["metadata"]['name'] == purposedName:
 
-               print ( 'Failed: Project Purposed Secret already deployed in target cluster' )
+            print ( 'Failed: Project Purposed Secret already deployed in target cluster' )
 
-               return False
+            return False
 
-     return True
+    return True
 
 # Gets a List of project/jobnames from the repo
 def getJobs():
@@ -63,9 +63,9 @@ def getJobs():
 
         projectName = item
 
-    jobList = [
-        x.name for x in Path("./src/_brigade/" + projectName).iterdir() if x.is_dir()
-    ]
+        jobList = [
+            x.name for x in Path("./src/_brigade/" + projectName).iterdir() if x.is_dir()
+        ]
 
     global jobs
 
@@ -91,76 +91,110 @@ def getJobs():
 
     return jobs
 
+# Creates new project/job
+def createNewJob(jobs):
+    
+    for k, v in jobs.items():
 
-# Reads config file from Repo, uses the job names from getJobs() and creates Brigade project/jobs in the cluster
-def createProjects(jobs):
+            prodID = str(uuid.uuid4())
 
-     for k, v in jobs.items():
+            projectFullName = str(v["projectName"])+ "/" + str(v["jobName"])
 
-          prodID = str(uuid.uuid4())
+            purposedName = "greenberet-" + str(prodID)
 
-          projectFullName = str(v["projectName"])+ "/" + str(v["jobName"])
+            connectionHold = {}
 
-          purposedName = "greenberet-" + str(prodID)
+            client.configuration.assert_hostname = False
 
-          connectionHold = {}
+            api_instance = client.CoreV1Api()
 
-          client.configuration.assert_hostname = False
+            sec = client.V1Secret()
 
-          api_instance = client.CoreV1Api()
-
-          sec = client.V1Secret()
-
-          if checkProjectNameSecret(purposedName, projectFullName) == False:
+            if checkProjectNameSecret(purposedName, projectFullName) == False:
 
                print("Bad Project Secret or Project Full Name - Already exist")
 
                break
                
-          v["Project-Secret-Name"] = purposedName
+            v["Project-Secret-Name"] = purposedName
 
-          sec.metadata = client.V1ObjectMeta(
+            sec.metadata = client.V1ObjectMeta(
                name=v["Project-Secret-Name"],
                namespace="default",
                labels={"app": "brigade", "component": "project", "heritage": "brigade"},
                annotations={"projectName": str(projectFullName)},
-          )
+            )
 
-          sec.type = "brigade.sh/project"
+            sec.type = "brigade.sh/project"
 
-          sec.string_data = {
+            sec.string_data = {
                "defaultScript": v["brigade-script"],
                "genericGatewaySecret": v["gatewaySecret"],
-          }
+            }
 
-          api_instance.create_namespaced_secret(namespace="default", body=sec)
+            api_instance.create_namespaced_secret(namespace="default", body=sec)
 
-          connectionHold["Project Name"] = v["Project-Secret-Name"]
+            connectionHold["Project Name"] = v["Project-Secret-Name"]
 
-          connectionHold["Job Name"] = str(k)
+            connectionHold["Job Name"] = str(k)
 
-          connectionHold["Job Secret"] = v["gatewaySecret"]
+            connectionHold["Job Secret"] = v["gatewaySecret"]
 
-          connectionsList.append(connectionHold)
+            connectionsList.append(connectionHold)
 
-     return connectionsList
+    return connectionsList
+
+# Replaces an old job with new brigade.js
+def createReplaceJob(jobs):
+    return
+
+
+
+# Various Checks before passing the jobs off to the correct handler function
+def createProjects(jobs):
+# Check the project has a gbJobHandler Set
+    for item in jobs:
+
+        try:
+
+            jobs[item]['gbJobHandler'] in jobs and None != jobs[item]['gbJobHandler']
+        
+        except:
+
+            print('Triggered because of missing data in gb.json')
+            
+            raise
+
+    for eachJob in jobs:
+
+        if jobs[eachJob]['gbJobHandler'] == 'new':
+    
+            print('Trigger Project New function/class with new flag')
+    
+            createNewJob(jobs)   
+    
+        elif jobs[eachJob]['gbJobHandler'] == 'replace':
+    
+            print('Trigger Project createProject with replace flag')
+
+            createReplaceJob(jobs)
+
+        elif jobs[eachJob]['gbJobHandler'] != 'new' and jobs[eachJob]['gbJobHandler'] != 'replace':
+    
+            print('Complain and exit, must have gbJobHandler to avoid harmful rollouts' )
+
+            return print('No GB handler!!!!')
+    return
 
 
 # routing clean up from incoming web request
-
 application.url_map.strict_slashes = False
 
 # catches any routing artifacts and forces the request to the correct location and the correct method
-
-
 @application.route("/<path:dummy>", methods=["POST"])
 
-# Main Flask Command function - trigger on successful call into Flask via Gunicorn
-
-
+#Main Flask Function that runs when a request is processed 
 def fallback(dummy):
-
-    ## ** Dev - Testing: incomingRequest = request.get_json.body
 
     # demo request stored locally for testing comment out to remove
     with open("demo_request.json") as json_file:
@@ -168,29 +202,21 @@ def fallback(dummy):
         incomingRequest = json.load(json_file)
 
     # Create dictonary to hold our answer
-
     response = {}
-
-    ## ** Dev - Testing: Set our Repo to Clone
-    ## ** Dev - Testing:    repoTarget = response['Response Message']['resource']['repository']['remoteUrl']
-    ## ** Dev - Testing: Pull our target repo
-    ## ** Dev - Testing:   pullTargetRepo(repoTarget)
 
     #  Get the Job Info
     getJobs()
 
-    # Set the jobs into brigade and return the gateway info for each.
+    # Main Project handler, will setup new or replacement job
     createProjects(jobs)
 
-    # Set our predict var
+    # Set our response object to be returned to the incoming call
     response["Response Message"] = connectionsList
 
     # Return our response in json format
     return jsonify(response.get("Response Message"))
 
-
 # Starts the flask app
-
 if __name__ == "__main__":
 
     try:
